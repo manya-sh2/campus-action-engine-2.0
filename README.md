@@ -1,4 +1,4 @@
-# Campus Action Engine
+# Campus Action Engine 2.0
 
 Campus Action Engine turns fragmented student information (Gmail, Google
 Classroom, Google Drive) into a personalized, prioritized action feed.
