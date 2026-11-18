@@ -4,7 +4,22 @@ const oauthService = require('./oauth.service');
 const translateGoogleError = require('../../utils/translateGoogleError');
 const ApiError = require('../../utils/ApiError');
 const mockData = require('./mock.data');
-const CLASSROOM_LOOKBACK_DAYS = 7;
+const { isWithinSyncWindow } = require('../../utils/syncWindow');
+// Cap each type per course to bound API usage for free-tier projects.
+const MAX_ITEMS_PER_COURSE = 200;
+
+async function listRecent(getPage, collectionKey) {
+  const result = [];
+  let pageToken;
+  do {
+    const { data } = await getPage({ pageSize: 100, ...(pageToken ? { pageToken } : {}) });
+    const items = data[collectionKey] || [];
+    result.push(...items.filter((item) => isWithinSyncWindow(item.creationTime)));
+    pageToken = data.nextPageToken;
+  } while (pageToken && result.length < MAX_ITEMS_PER_COURSE);
+  return result.slice(0, MAX_ITEMS_PER_COURSE);
+}
+
 
 function classroomClient(authClient) {
   return google.classroom({ version: 'v1', auth: authClient });
@@ -40,33 +55,18 @@ async function getAnnouncements(userId, courseId) {
   }
 
   if (env.GOOGLE_MOCK_MODE) {
-    const cutoff = Date.now() - CLASSROOM_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
-
-    return mockData.classroomAnnouncements.filter((announcement) => {
-      if (!announcement.creationTime) return true;
-
-      return new Date(announcement.creationTime).getTime() >= cutoff;
-    });
+    return mockData.classroomAnnouncements.filter((announcement) => isWithinSyncWindow(announcement.creationTime));
   }
 
   const client = await oauthService.getAuthorizedClient(userId);
   const classroom = classroomClient(client);
 
   try {
-    const { data } = await classroom.courses.announcements.list({
-      courseId,
-      pageSize: 20,
-    });
-
-    const cutoff = Date.now() - CLASSROOM_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
-
-    return (data.announcements || [])
-      .filter((a) => {
-        if (!a.creationTime) return true;
-
-        return new Date(a.creationTime).getTime() >= cutoff;
-      })
-      .map((a) => ({
+    const announcements = await listRecent(
+      (params) => classroom.courses.announcements.list({ courseId, ...params }),
+      'announcements'
+    );
+    return announcements.map((a) => ({
         id: a.id,
         courseId: a.courseId,
         text: a.text,
@@ -87,33 +87,18 @@ async function getCourseWork(userId, courseId) {
   }
 
   if (env.GOOGLE_MOCK_MODE) {
-    const cutoff = Date.now() - CLASSROOM_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
-
-    return mockData.classroomCourseWork.filter((work) => {
-      if (!work.creationTime) return true;
-
-      return new Date(work.creationTime).getTime() >= cutoff;
-    });
+    return mockData.classroomCourseWork.filter((work) => isWithinSyncWindow(work.creationTime));
   }
 
   const client = await oauthService.getAuthorizedClient(userId);
   const classroom = classroomClient(client);
 
   try {
-    const { data } = await classroom.courses.courseWork.list({
-      courseId,
-      pageSize: 20,
-    });
-
-    const cutoff = Date.now() - CLASSROOM_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
-
-    return (data.courseWork || [])
-      .filter((w) => {
-        if (!w.creationTime) return true;
-
-        return new Date(w.creationTime).getTime() >= cutoff;
-      })
-      .map((w) => ({
+    const coursework = await listRecent(
+      (params) => classroom.courses.courseWork.list({ courseId, ...params }),
+      'courseWork'
+    );
+    return coursework.map((w) => ({
         id: w.id,
         courseId: w.courseId,
         title: w.title,

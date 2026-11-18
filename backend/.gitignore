@@ -4,3 +4,6 @@ node_modules/
 npm-debug.log*
 *.log
 .DS_Store
+
+# Local Gemini quota accounting (contains only timestamps and model names)
+.runtime/

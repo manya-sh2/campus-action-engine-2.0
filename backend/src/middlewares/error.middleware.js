@@ -1,5 +1,6 @@
 const env = require('../config/env');
 const ApiError = require('../utils/ApiError');
+const { log } = require('../utils/logger');
 
 // Translates known error types (ApiError, Mongoose validation/cast errors,
 // duplicate key errors) into a consistent status code + message.
@@ -40,7 +41,8 @@ function errorHandler(err, req, res, next) {
   const { statusCode, message, details } = normalizeError(err);
 
   if (statusCode >= 500) {
-    console.error('[error]', err);
+    // Raw HTTP/provider errors may contain headers, tokens, or email contents.
+    log('http.error', { status: statusCode, code: 'server_error' }, 'error');
   }
 
   const body = {

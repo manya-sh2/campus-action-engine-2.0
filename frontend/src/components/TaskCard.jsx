@@ -1,7 +1,7 @@
 import { PriorityBadge, StatusBadge, EligibilityBadge } from './Badges';
 
 function formatDeadline(deadline) {
-  if (!deadline) return 'No deadline';
+  if (!deadline) return 'Deadline not specified';
   const d = new Date(deadline);
   const now = new Date();
   const diffMs = d.getTime() - now.getTime();

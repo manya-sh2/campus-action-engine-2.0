@@ -24,15 +24,20 @@ async function start() {
       console.log('[server] GOOGLE_MOCK_MODE is enabled - Gmail/Classroom/Drive endpoints will return mock data.');
     }
 
-    if (!env.OPENAI_MOCK_MODE) {
-      if (!env.OPENAI_API_KEY) {
+    if (!env.AI_MOCK_MODE) {
+      const requiredKeyName = env.AI_PROVIDER === 'gemini' ? 'GEMINI_API_KEY' : 'OPENAI_API_KEY';
+      if (!env[requiredKeyName]) {
         console.warn(
-          '[server] Warning: OPENAI_API_KEY is not set. POST /api/tasks/sync will fail until it is set in .env, ' +
-            'or set OPENAI_MOCK_MODE=true for local testing without an OpenAI API key.'
+          `[server] Warning: ${requiredKeyName} is missing (AI_PROVIDER=${env.AI_PROVIDER}). ` +
+          `Expected backend environment file: ${env.ENV_FILE_PATH}. ` +
+          'Run npm run check:config inside backend.'
         );
+      } else {
+        console.log(`[server] AI extraction provider: ${env.AI_PROVIDER}`);
+        console.log('[server] Sync and AI request progress will appear in this terminal (email contents and keys are excluded).');
       }
     } else {
-      console.log('[server] OPENAI_MOCK_MODE is enabled - task sync will use a rule-based mock extractor instead of OpenAI.');
+      console.log('[server] AI_MOCK_MODE enabled - using the offline rule-based extractor.');
     }
 
     const server = http.createServer(app);

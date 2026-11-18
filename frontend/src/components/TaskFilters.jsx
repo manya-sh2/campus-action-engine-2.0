@@ -1,5 +1,5 @@
-const CATEGORIES = ['', 'job', 'internship', 'assignment', 'exam', 'event', 'scholarship', 'registration', 'announcement', 'other'];
-const STATUSES = ['', 'pending', 'in_progress', 'completed', 'dismissed'];
+const CATEGORIES = ['', 'job', 'internship', 'assignment', 'exam'];
+const STATUSES = ['active', '', 'pending', 'in_progress', 'completed', 'dismissed'];
 const PRIORITY_LEVELS = ['', 'critical', 'high', 'medium', 'low'];
 
 export function TaskFilters({ filters, onChange }) {

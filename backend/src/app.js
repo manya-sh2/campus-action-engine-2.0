@@ -12,8 +12,22 @@ const taskRoutes = require('./routes/task.routes');
 const mcpRoutes = require('./routes/mcp.routes');
 const notFound = require('./middlewares/notFound.middleware');
 const errorHandler = require('./middlewares/error.middleware');
+const { log } = require('./utils/logger');
 
 const app = express();
+
+app.use((req, res, next) => {
+  const started = Date.now();
+  res.on('finish', () => {
+    // Matched route templates only; never log OAuth callback query strings,
+    // request headers/cookies, bodies, or user-supplied paths/identifiers.
+    log('http.finished', {
+      method: req.method, route: req.route?.path || '(unmatched)',
+      status: res.statusCode, durationMs: Date.now() - started,
+    }, res.statusCode >= 400 ? 'warn' : 'info');
+  });
+  next();
+});
 
 // --- Core middleware ---
 app.use(

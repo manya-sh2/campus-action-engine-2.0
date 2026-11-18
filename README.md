@@ -1,3 +1,11 @@
+> **Gemini API update (2026):** This version defaults to Gemini free-tier
+> extraction using `AI_PROVIDER=gemini`, `GEMINI_API_KEY` and
+> `GEMINI_MODEL=gemini-3.1-flash-lite`. A Gemini key does **not** work at the
+> regular OpenAI endpoint; the backend now uses Google's OpenAI-compatible
+> endpoint. **Windows setup:** see [WINDOWS_SETUP.md](WINDOWS_SETUP.md).
+> API keys are never included in the ZIP. The original OpenAI and mock
+> modes remain optional.
+
 # Campus Action Engine 2.0
 
 Campus Action Engine turns fragmented student information (Gmail, Google
@@ -242,11 +250,24 @@ npm install
 
 ## Configuration
 
+**Windows / PowerShell users:** See [WINDOWS_SETUP.md](WINDOWS_SETUP.md)
+for the exact `.env` location, safe key check, and restart steps.
+
+The backend now reads `.env` from `backend/.env` regardless of where the
+Node process is started. To check whether the key was loaded **without
+printing it**, run `cd backend` and then `npm run check:config`.
+
+
 Copy the example environment file and fill in your own values:
 
 ```bash
+cd backend
 cp .env.example .env
 ```
+
+On Windows PowerShell, use `Copy-Item .env.example .env` from the
+`backend` directory instead. If your `.env` already exists, don't
+overwrite it with the example. Restart the backend after editing it.
 
 `.env` variables:
 
@@ -263,9 +284,14 @@ cp .env.example .env
 | `SESSION_COOKIE_NAME`    | Name of the application session cookie                                        | `cae_session`                                             |
 | `SESSION_TTL_DAYS`       | How many days a login session stays valid                                     | `7`                                                       |
 | `GOOGLE_MOCK_MODE`       | `"true"` to use canned Gmail/Classroom/Drive data instead of real Google APIs | `false`                                                   |
-| `OPENAI_API_KEY`         | API key from platform.openai.com                                              | `sk-...`                                                  |
-| `OPENAI_MODEL`           | Any current model supporting Structured Outputs (`response_format: json_schema`) | `gpt-4o-mini`                                          |
-| `OPENAI_MOCK_MODE`       | `"true"` to use a rule-based mock extractor instead of calling OpenAI         | `false`                                                   |
+| `AI_PROVIDER`           | AI provider, `gemini` (recommended) or `openai`                               | `gemini`                                                  |
+| `GEMINI_API_KEY`        | Google AI Studio Gemini API key, required for Gemini mode                     | (secret)                                                  |
+| `GEMINI_MODEL`          | Gemini model available to your Google AI Studio project                      | `gemini-3.1-flash-lite`                                    |
+| `GEMINI_BASE_URL`       | Gemini's OpenAI-compatible API endpoint                                      | `https://generativelanguage.googleapis.com/v1beta/openai/` |
+| `GEMINI_MIN_REQUEST_INTERVAL_MS` | Delay between Gemini API requests (helps free RPM limits)          | `6000`                                                    |
+| `OPENAI_API_KEY`        | Only required when `AI_PROVIDER=openai`                                       | (secret)                                                  |
+| `OPENAI_MODEL`          | Model when using actual OpenAI API                                            | `gpt-4o-mini`                                             |
+| `AI_MOCK_MODE`          | `"true"` uses the local rule-based extractor instead of either API            | `false`                                                   |
 
 `.env` is git-ignored — never commit real credentials.
 
@@ -996,3 +1022,14 @@ only, not a global crash).
 - No automated test suite (frontend or backend) is checked into the
   repo - verification at each phase was done via temporary smoke-test
   harnesses, deleted after each phase.
+
+
+### Gemini free-tier reliability update
+
+This build includes a local quota ledger (`backend/.runtime`, ignored by Git),
+conservative request pacing (4/min, 12/day default), four-item extraction batches,
+a 24-item sync cap, a one-time 503 retry, an adaptive 429 cooldown, and a
+MongoDB cache of ignored source IDs. The API sync response includes `deferred`,
+`processed`, `stoppedReason` and `quota` fields. See `WINDOWS_SETUP.md` for
+details, including how to configure your project's actual Google AI Studio
+model and quota limits.

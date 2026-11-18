@@ -47,6 +47,9 @@ const taskSchema = new mongoose.Schema(
     },
     sourceLink: { type: String, trim: true },
     courseId: { type: String, trim: true },
+    // Original Gmail receive time or Classroom creation time. Never use
+    // createdAt to decide if a source item is within the last 30 days.
+    sourceOccurredAt: { type: Date, default: null },
 
     // --- Classification (pipeline gate result, never IGNORE by invariant) ---
     classification: {
@@ -111,6 +114,7 @@ taskSchema.index({ userId: 1, priorityScore: -1 });
 taskSchema.index({ userId: 1, priorityLevel: 1 });
 taskSchema.index({ userId: 1, status: 1 });
 taskSchema.index({ userId: 1, deadline: 1 });
+taskSchema.index({ userId: 1, sourceOccurredAt: -1 });
 taskSchema.index({ userId: 1, classification: 1 });
 
 module.exports = mongoose.model('Task', taskSchema);

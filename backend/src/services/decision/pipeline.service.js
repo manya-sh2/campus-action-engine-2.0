@@ -5,6 +5,7 @@ const { scoreImportance } = require('./importance.service');
 const { scoreUrgency } = require('./urgency.service');
 const { computePriority } = require('./priority.service');
 const ApiError = require('../../utils/ApiError');
+const { isPastDeadline, IMPORTANT_CATEGORIES } = require('../../utils/syncWindow');
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Sentinel used by the pipeline to signal "this item was deliberately
@@ -45,8 +46,8 @@ const OPPORTUNITY_CATEGORIES = new Set(['job', 'internship', 'scholarship', 'eve
  * @param {object} normalizedItem - see services/ingestion/normalizer.js
  * @param {object} user - the student's profile (User document)
  */
-async function runPipeline(normalizedItem, user) {
-  const raw = await llmService.extractStructuredInfo(normalizedItem);
+async function runPipeline(normalizedItem, user, preExtracted = null) {
+  const raw = preExtracted || await llmService.extractStructuredInfo(normalizedItem);
 
   const validationErrors = validateExtraction(raw);
   if (validationErrors.length > 0) {
@@ -63,6 +64,10 @@ async function runPipeline(normalizedItem, user) {
     );
   }
 
+  if (!IMPORTANT_CATEGORIES.includes(raw.category)) {
+    throw new ItemIgnoredError('Outside the recruitment and academic task scope', 'out_of_scope');
+  }
+
   // ── Gate 2: Eligibility for opportunities ─────────────────────────────────
   // For items that are opportunities (internship/job/scholarship/event/
   // registration), run the eligibility engine. If the student is definitively
@@ -76,9 +81,24 @@ async function runPipeline(normalizedItem, user) {
     );
   }
 
+  // Classroom's dueDate + dueTime are authoritative UTC values, not
+  // estimates from an LLM. Do not spend time persisting expired coursework.
+  if (isPastDeadline(normalizedItem.sourceDeadline)) {
+    throw new ItemIgnoredError('Classroom coursework deadline has already passed', 'past_deadline');
+  }
+  if (normalizedItem.sourceDeadline) raw.deadline = normalizedItem.sourceDeadline;
+
   // ── Scoring: Importance → Urgency → Priority ───────────────────────────────
   const importanceResult = scoreImportance({ user, extraction: raw, eligibilityResult });
   const urgencyResult = scoreUrgency({ extraction: raw, user });
+  // Evaluate after timezone resolution; a date-only deadline means local
+  // end-of-day, not midnight UTC. Reject before scoring/persistence/notifications.
+  if (isPastDeadline(urgencyResult.deadline)) {
+    throw new ItemIgnoredError('The deadline has already passed', 'past_deadline');
+  }
+  if (raw.category === 'assignment' && !urgencyResult.deadline) {
+    throw new ItemIgnoredError('Assignment has no verified future due date', 'missing_deadline');
+  }
   const priorityResult = computePriority({ importance: importanceResult, urgency: urgencyResult });
 
   return {
@@ -87,6 +107,7 @@ async function runPipeline(normalizedItem, user) {
     sourceType: normalizedItem.sourceType,
     sourceLink: normalizedItem.link,
     courseId: normalizedItem.courseId,
+    sourceOccurredAt: new Date(normalizedItem.occurredAt),
 
     classification: raw.classification,
     category: raw.category,

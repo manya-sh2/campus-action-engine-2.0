@@ -1,7 +1,52 @@
 const Task = require('../models/Task');
+const ProcessedSource = require('../models/ProcessedSource');
 const ApiError = require('../utils/ApiError');
 const { scoreUrgency } = require('./decision/urgency.service');
 const { computePriority } = require('./decision/priority.service');
+const { visibleTaskFilter } = require('../utils/syncWindow');
+
+/**
+ * Avoid spending Gemini free-tier quota on source items already converted
+ * into tasks during a prior sync. Ignored items are intentionally not stored.
+ */
+async function findExistingSourceKeys(userId, items) {
+  const identities = items
+    .filter((item) => item.source && item.sourceId)
+    .map((item) => ({ source: item.source, sourceId: item.sourceId }));
+  if (!identities.length) return new Set();
+  const [tasks, ignored] = await Promise.all([
+    Task.find({ userId, $or: identities }).select('source sourceId').lean(),
+    ProcessedSource.find({ userId, $or: identities }).select('source sourceId').lean(),
+  ]);
+  return new Set([...tasks, ...ignored].map((item) => JSON.stringify([item.source, item.sourceId])));
+}
+
+// Previously saved tasks may lack a source timestamp. Backfill only items
+// fetched from Gmail/Classroom in the current window. Never erase old data.
+async function backfillSourceDates(userId, items) {
+  const unique = new Map();
+  for (const item of items) {
+    if (!item.source || !item.sourceId || !item.occurredAt) continue;
+    const key = JSON.stringify([item.source, item.sourceId]);
+    unique.set(key, item);
+  }
+  if (!unique.size) return;
+  await Task.bulkWrite(Array.from(unique.values(), (item) => ({
+    updateOne: {
+      filter: { userId, source: item.source, sourceId: item.sourceId, sourceOccurredAt: null },
+      update: { $set: { sourceOccurredAt: new Date(item.occurredAt) } },
+    },
+  })), { ordered: false });
+}
+
+async function rememberIgnoredSource(userId, item, reason) {
+  if (!item.source || !item.sourceId) return;
+  await ProcessedSource.updateOne(
+    { userId, source: item.source, sourceId: item.sourceId },
+    { $setOnInsert: { reason: reason || 'ignored', processedAt: new Date() } },
+    { upsert: true }
+  );
+}
 
 const DUPLICATE_KEY_CODE = 11000;
 const VALID_STATUSES = ['pending', 'in_progress', 'completed', 'dismissed'];
@@ -34,14 +79,9 @@ async function createTaskIfNotExists(userId, candidate) {
 }
 
 function buildFilter(userId, { status, category, priorityLevel, minPriority } = {}) {
-  const filter = {
-    userId,
-    $or: [
-      { deadline: null },
-      { deadline: { $gt: new Date() } },
-    ],
-  };
-  if (status) filter.status = status;
+  const filter = { userId, ...visibleTaskFilter() };
+  if (status === 'active') filter.status = { $in: ['pending', 'in_progress'] };
+  else if (status) filter.status = status;
   if (category) {
     const categories = Array.isArray(category) ? category : String(category).split(',').map((s) => s.trim());
     filter.category = categories.length > 1 ? { $in: categories } : categories[0];
@@ -70,6 +110,8 @@ async function listTasks(userId, options = {}) {
   const safeSortOrder = sortOrder === 'asc' ? 1 : -1;
 
   const filter = buildFilter(userId, options);
+  // Filter before pagination so undated tasks cannot displace real deadlines.
+  if (options.hasDeadline === true) filter.deadline = { $gt: new Date() };
 
   const [tasks, total] = await Promise.all([
     Task.find(filter)
@@ -97,10 +139,8 @@ async function getHighPriorityTasks(userId) {
   return Task.find({
     userId,
     priorityLevel: { $in: ['critical', 'high'] },
-    $or: [
-      { deadline: null },
-      { deadline: { $gt: new Date() } },
-    ],
+    status: { $in: ['pending', 'in_progress'] },
+    ...visibleTaskFilter(),
   }).sort({ priorityScore: -1 });
 }
 
@@ -111,7 +151,7 @@ async function getHighPriorityTasks(userId) {
  * nonexistent one - never trust a taskId alone for authorization.
  */
 async function getTaskById(userId, taskId) {
-  const task = await Task.findOne({ _id: taskId, userId });
+  const task = await Task.findOne({ _id: taskId, userId, ...visibleTaskFilter() });
   if (!task) {
     throw ApiError.notFound(`Task with id '${taskId}' not found`);
   }
@@ -130,7 +170,9 @@ async function updateTaskStatus(userId, taskId, status) {
     throw ApiError.badRequest(`status must be one of: ${VALID_STATUSES.join(', ')}`);
   }
 
-  const task = await Task.findOneAndUpdate({ _id: taskId, userId }, { status }, { new: true, runValidators: true });
+  const task = await Task.findOneAndUpdate(
+    { _id: taskId, userId, ...visibleTaskFilter() }, { status }, { new: true, runValidators: true }
+  );
   if (!task) {
     throw ApiError.notFound(`Task with id '${taskId}' not found`);
   }
@@ -148,8 +190,9 @@ async function updateTaskStatus(userId, taskId, status) {
 async function findPendingTasksWithDeadlines({ withinDays = 31 } = {}) {
   const cutoff = new Date(Date.now() + withinDays * 24 * 60 * 60 * 1000);
   return Task.find({
-    status: 'pending',
-    deadline: { $ne: null, $lte: cutoff },
+    ...visibleTaskFilter(),
+    status: { $in: ['pending', 'in_progress'] },
+    deadline: { $gt: new Date(), $lte: cutoff },
   }).populate('userId');
 }
 
@@ -211,15 +254,16 @@ async function getUpcomingDeadlines(userId, { withinDays = 14 } = {}) {
   const cutoff = new Date(Date.now() + withinDays * 24 * 60 * 60 * 1000);
   return Task.find({
     userId,
-    status: 'pending',
-    deadline: {
-      $gt: new Date(),
-      $lte: cutoff,
-    },
+    ...visibleTaskFilter(),
+    status: { $in: ['pending', 'in_progress'] },
+    deadline: { $gt: new Date(), $lte: cutoff },
   }).sort({ deadline: 1 });
 }
 
 module.exports = {
+  findExistingSourceKeys,
+  rememberIgnoredSource,
+  backfillSourceDates,
   createTaskIfNotExists,
   listTasks,
   getHighPriorityTasks,

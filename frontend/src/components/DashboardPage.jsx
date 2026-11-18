@@ -4,17 +4,22 @@ import { TaskFilters } from './TaskFilters';
 import { TaskDetailDrawer } from './TaskDetailDrawer';
 import { SyncPanel } from './SyncPanel';
 import { Banner } from './Feedback';
+import { isTaskVisible } from '../utils/taskVisibility';
 
 export function DashboardPage({ tasksState }) {
   const { filters, setFilters, tasks, pagination, highPriority, upcomingDeadlines, loading, error, reload, updateStatus } = tasksState;
   const [selectedTask, setSelectedTask] = useState(null);
   const [busyTaskId, setBusyTaskId] = useState(null);
+  const [actionError, setActionError] = useState(null);
 
   const handleUpdateStatus = async (taskId, status) => {
     setBusyTaskId(taskId);
+    setActionError(null);
     try {
       await updateStatus(taskId, status);
       setSelectedTask((prev) => (prev && prev._id === taskId ? { ...prev, status } : prev));
+    } catch (err) {
+      setActionError(err.message || 'Could not update this task');
     } finally {
       setBusyTaskId(null);
     }
@@ -25,6 +30,7 @@ export function DashboardPage({ tasksState }) {
       <SyncPanel onSynced={reload} />
 
       {error && <Banner type="error">{error}</Banner>}
+      {actionError && <Banner type="error">{actionError}</Banner>}
 
       <section className="dashboard-section">
         <h2>Critical / High Priority</h2>
@@ -42,7 +48,7 @@ export function DashboardPage({ tasksState }) {
 
       <section className="dashboard-section">
         <h2>Upcoming Deadlines</h2>
-        <p className="section-hint">Pending tasks, soonest deadline first.</p>
+        <p className="section-hint">Active tasks, soonest deadline first.</p>
         <TaskList
           tasks={upcomingDeadlines}
           loading={loading && upcomingDeadlines.length === 0}
@@ -85,7 +91,7 @@ export function DashboardPage({ tasksState }) {
       </section>
 
       <TaskDetailDrawer
-        task={selectedTask}
+        task={isTaskVisible(selectedTask, tasksState.now) ? selectedTask : null}
         onClose={() => setSelectedTask(null)}
         onUpdateStatus={handleUpdateStatus}
         busy={selectedTask && busyTaskId === selectedTask._id}

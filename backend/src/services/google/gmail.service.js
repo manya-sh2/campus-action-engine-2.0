@@ -4,6 +4,7 @@ const oauthService = require('./oauth.service');
 const translateGoogleError = require('../../utils/translateGoogleError');
 const ApiError = require('../../utils/ApiError');
 const mockData = require('./mock.data');
+const { LOOKBACK_DAYS, isWithinSyncWindow } = require('../../utils/syncWindow');
 
 function decodeBase64Url(data) {
   if (!data) return '';
@@ -56,7 +57,6 @@ function extractAttachments(payload, acc = []) {
 
   return acc;
 }
-const GMAIL_LOOKBACK_DAYS = 7;
 
 function getHeader(headers, name) {
   const header = (headers || []).find((h) => h.name.toLowerCase() === name.toLowerCase());
@@ -89,38 +89,45 @@ function normalizeMessage(raw) {
  * @param {{ q?: string, maxResults?: number }} options
  */
 async function getMessages(userId, options = {}) {
+  // Bound a single sync to a reasonable number of messages to protect the
+  // Gemini free-tier quota. Allow a caller to request a smaller/larger cap.
+  const requested = Number(options.maxResults);
+  const limit = Number.isFinite(requested) && requested > 0
+    ? Math.min(200, Math.floor(requested)) : 100;
   if (env.GOOGLE_MOCK_MODE) {
-    const cutoff = Date.now() - GMAIL_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
-
-    return mockData.gmailMessages.filter((message) => {
-      if (!message.receivedAt) return true;
-
-      return new Date(message.receivedAt).getTime() >= cutoff;
-    });
+    return mockData.gmailMessages.filter((message) => isWithinSyncWindow(message.receivedAt)).slice(0, limit);
   }
 
   const client = await oauthService.getAuthorizedClient(userId);
   const gmail = google.gmail({ version: 'v1', auth: client });
 
   try {
-    const listRes = await gmail.users.messages.list({
-      userId: 'me',
-      maxResults: options.maxResults || 15,
-      q: [options.q, `newer_than:${GMAIL_LOOKBACK_DAYS}d`]
-        .filter(Boolean)
-        .join(' '),
-    });
+    const messageRefs = [];
+    let pageToken;
+    do {
+      const listRes = await gmail.users.messages.list({
+        userId: 'me',
+        maxResults: Math.min(100, limit - messageRefs.length),
+        q: [options.q, `newer_than:${LOOKBACK_DAYS}d`].filter(Boolean).join(' '),
+        ...(pageToken ? { pageToken } : {}),
+      });
+      messageRefs.push(...(listRes.data.messages || []));
+      pageToken = listRes.data.nextPageToken;
+    } while (pageToken && messageRefs.length < limit);
 
-    const messageRefs = listRes.data.messages || [];
-
-    const messages = await Promise.all(
-      messageRefs.map(async (ref) => {
+    // Gmail search timestamps are approximate boundaries: also validate
+    // internalDate for each individual message, never the email Date header.
+    const messages = [];
+    // Avoid firing 100 message-detail requests at Google simultaneously.
+    for (let offset = 0; offset < messageRefs.length; offset += 10) {
+      const batch = await Promise.all(messageRefs.slice(offset, offset + 10).map(async (ref) => {
         const { data } = await gmail.users.messages.get({ userId: 'me', id: ref.id, format: 'full' });
         return normalizeMessage(data);
-      })
-    );
+      }));
+      messages.push(...batch);
+    }
 
-    return messages;
+    return messages.filter((message) => isWithinSyncWindow(message.receivedAt));
   } catch (err) {
     throw translateGoogleError(err, 'Gmail');
   }

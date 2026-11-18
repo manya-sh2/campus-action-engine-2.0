@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { taskApi } from '../api/endpoints';
+import { isTaskVisible } from '../utils/taskVisibility';
 
-const DEFAULT_FILTERS = { status: 'pending', category: '', priorityLevel: '', sortBy: 'priorityScore', sortOrder: 'desc', page: 1, limit: 20 };
+const DEFAULT_FILTERS = { status: 'active', category: '', priorityLevel: '', sortBy: 'priorityScore', sortOrder: 'desc', page: 1, limit: 20 };
 
 export function useTasks({ enabled, refreshSignal }) {
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
@@ -11,32 +12,60 @@ export function useTasks({ enabled, refreshSignal }) {
   const [upcomingDeadlines, setUpcomingDeadlines] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
+  const [now, setNow] = useState(Date.now);
+  const requestVersion = useRef(0);
 
-  const loadAll = useCallback(async () => {
+  const loadAll = useCallback(async ({ silent = false } = {}) => {
     if (!enabled) return;
-    setLoading(true);
+    const version = ++requestVersion.current;
+    if (!silent) setLoading(true);
     setError(null);
     try {
-      const [listRes, highRes] = await Promise.all([taskApi.list(filters), taskApi.highPriority()]);
+      const [listRes, highRes, deadlineRes] = await Promise.all([
+        taskApi.list(filters), taskApi.highPriority(),
+        taskApi.list({ status: 'active', hasDeadline: true, sortBy: 'deadline', sortOrder: 'asc', limit: 10 }),
+      ]);
+      if (version !== requestVersion.current) return;
       setTasks(listRes.data.tasks);
       setPagination(listRes.data.pagination);
       setHighPriority(highRes.data);
 
-      // "Upcoming deadlines" view: pending tasks with a deadline, soonest
-      // first - reuses the same listTasks endpoint with different
-      // sort/filter params rather than inventing new client-side logic.
-      const deadlineRes = await taskApi.list({ status: 'pending', sortBy: 'deadline', sortOrder: 'asc', limit: 10 });
-      setUpcomingDeadlines(deadlineRes.data.tasks.filter((t) => t.deadline));
+      setUpcomingDeadlines(deadlineRes.data.tasks);
     } catch (err) {
-      setError(err.message || 'Failed to load tasks');
+      if (version === requestVersion.current) setError(err.message || 'Failed to load tasks');
     } finally {
-      setLoading(false);
+      if (version === requestVersion.current) setLoading(false);
     }
   }, [enabled, filters]);
 
   useEffect(() => {
-    loadAll();
-  }, [loadAll, refreshSignal]);
+    if (enabled) loadAll();
+    else {
+      setTasks([]);
+      setHighPriority([]);
+      setUpcomingDeadlines([]);
+      setPagination(null);
+      setLoading(false);
+      setError(null);
+    }
+    return () => { requestVersion.current += 1; };
+  }, [enabled, loadAll, refreshSignal]);
+
+  useEffect(() => {
+    if (!enabled) return undefined;
+    setNow(Date.now());
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [enabled]);
+
+  // Re-query the backend periodically while the dashboard is open so a
+  // deadline that has *just* expired disappears without a manual refresh.
+  // Silent refresh avoids flashing the loading spinner every minute.
+  useEffect(() => {
+    if (!enabled) return undefined;
+    const timer = setInterval(() => loadAll({ silent: true }), 60 * 1000);
+    return () => clearInterval(timer);
+  }, [enabled, loadAll]);
 
   const updateStatus = useCallback(
     async (taskId, status) => {
@@ -49,10 +78,11 @@ export function useTasks({ enabled, refreshSignal }) {
   return {
     filters,
     setFilters: (patch) => setFilters((prev) => ({ ...prev, ...patch, page: patch.page ?? 1 })),
-    tasks,
+    tasks: tasks.filter((task) => isTaskVisible(task, now)),
     pagination,
-    highPriority,
-    upcomingDeadlines,
+    highPriority: highPriority.filter((task) => isTaskVisible(task, now) && ['pending', 'in_progress'].includes(task.status)),
+    upcomingDeadlines: upcomingDeadlines.filter((task) => isTaskVisible(task, now) && task.deadline && ['pending', 'in_progress'].includes(task.status)),
+    now,
     loading,
     error,
     reload: loadAll,

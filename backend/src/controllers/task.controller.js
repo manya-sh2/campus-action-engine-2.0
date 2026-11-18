@@ -38,6 +38,7 @@ const listTasks = asyncHandler(async (req, res) => {
     limit,
     sortBy,
     sortOrder,
+    hasDeadline: req.query.hasDeadline === 'true',
   });
 
   sendSuccess(res, { data: { tasks, pagination } });

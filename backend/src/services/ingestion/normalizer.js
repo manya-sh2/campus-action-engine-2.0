@@ -41,8 +41,22 @@ function normalizeClassroomAnnouncement(announcement, courseName) {
     from: courseName,
     courseId: announcement.courseId,
     link: announcement.alternateLink,
-    occurredAt: announcement.updateTime || announcement.creationTime,
+    occurredAt: announcement.creationTime,
   };
+}
+
+function classroomUtcDeadline(courseWork) {
+  const due = courseWork.dueDate;
+  if (!due) return null;
+  const { year, month, day } = due;
+  const time = courseWork.dueTime || { hours: 23, minutes: 59, seconds: 0 };
+  const ms = Date.UTC(year, month - 1, day, time.hours || 0, time.minutes || 0,
+    time.seconds || 0, Math.floor((time.nanos || 0) / 1000000));
+  const date = new Date(ms);
+  // Date.UTC normalizes invalid dates; reject those instead of inventing one.
+  if (!Number.isFinite(ms) || date.getUTCFullYear() !== year ||
+      date.getUTCMonth() + 1 !== month || date.getUTCDate() !== day) return null;
+  return date.toISOString();
 }
 
 function normalizeClassroomCourseWork(courseWork, courseName) {
@@ -72,9 +86,10 @@ function normalizeClassroomCourseWork(courseWork, courseName) {
     from: courseName,
     courseId: courseWork.courseId,
     link: courseWork.alternateLink,
-    occurredAt: courseWork.updateTime || courseWork.creationTime,
+    occurredAt: courseWork.creationTime,
+    sourceDeadline: classroomUtcDeadline(courseWork),
     workType: courseWork.workType,  // preserved so downstream services can inspect it directly
   };
 }
 
-module.exports = { normalizeGmailMessage, normalizeClassroomAnnouncement, normalizeClassroomCourseWork };
+module.exports = { normalizeGmailMessage, normalizeClassroomAnnouncement, normalizeClassroomCourseWork, classroomUtcDeadline };

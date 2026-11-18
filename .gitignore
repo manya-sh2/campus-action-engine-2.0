@@ -1,0 +1,25 @@
+# Environment variables and API keys
+.env
+.env.*
+!.env.example
+
+# Dependencies
+node_modules/
+
+# Build files
+dist/
+build/
+coverage/
+
+# Gemini API usage tracking
+backend/.runtime/
+
+# Sensitive credentials
+*.pem
+*.key
+credentials.json
+token.json
+
+# OS files
+.DS_Store
+Thumbs.db
