@@ -1,1035 +1,331 @@
-> **Gemini API update (2026):** This version defaults to Gemini free-tier
-> extraction using `AI_PROVIDER=gemini`, `GEMINI_API_KEY` and
-> `GEMINI_MODEL=gemini-3.1-flash-lite`. A Gemini key does **not** work at the
-> regular OpenAI endpoint; the backend now uses Google's OpenAI-compatible
-> endpoint. **Windows setup:** see [WINDOWS_SETUP.md](WINDOWS_SETUP.md).
-> API keys are never included in the ZIP. The original OpenAI and mock
-> modes remain optional.
-
 # Campus Action Engine 2.0
 
-Campus Action Engine turns fragmented student information (Gmail, Google
-Classroom, Google Drive) into a personalized, prioritized action feed.
+A full-stack application that turns recent Gmail and Google Classroom communications into a personalized academic and recruitment task feed.
 
-This project is being built **phase by phase**. This README documents only
-what has actually been implemented so far.
+Gemini extracts structured facts from messages. Backend rules check relevance and eligibility, calculate priority, and keep expired items out of the dashboard. Google Drive integration and an authenticated MCP endpoint provide file and task actions.
 
----
+## Features
 
-## Current Status: Phase 5 — Frontend + End-to-End Integration (Complete)
+- **Google sign-in:** session-based access to the student's own profile, tasks, and Google connection.
+- **Gmail and Classroom sync:** processes source items from a rolling **30-day window**, based on the original received or published timestamp.
+- **Focused task feed:** jobs, internships, placement-process updates, semester exam notices, and assignments with known future deadlines.
+- **Structured AI extraction:** category, summary, organization, eligibility criteria, skills, deadline, and action link.
+- **Personalized ranking:** branch, CGPA, graduation year, preferred roles, skill overlap, and deadline urgency.
+- **Dashboard:** high-priority tasks, upcoming deadlines, filters, pagination, task details, and Complete/Dismiss actions.
+- **Real-time notifications:** Socket.IO events for new important tasks, priority changes, and completion.
+- **Deadline automation:** scheduled urgency and priority recalculation with node-cron.
+- **Google Drive:** file search, metadata lookup, and upload.
+- **MCP integration:** eight authenticated tools for profile, task, and Drive operations.
+- **Quota-aware processing:** batched Gemini requests, request pacing, persistent local budget tracking, duplicate detection, and cached ignored source IDs.
+- **Terminal logs:** HTTP status/timing, sync progress, AI request outcomes, batch results, and remaining local request budget.
 
-Phase 5 adds a React + Vite frontend that demonstrates the full backend
-built in Phases 1-4: Google sign-in, a prioritized task dashboard with
-real-time updates, task completion, Gmail/Classroom sync, and Drive
-search/upload - all talking to the existing backend through its
-existing REST/Socket.IO APIs. No new backend architecture, no second
-authentication system, no new database.
+## What appears in the dashboard?
 
-```
-Gmail/Classroom → Normalizer → LLM Extraction → Validation →
-Eligibility → Importance → Urgency → Priority → MongoDB Task
-  → Socket.IO real-time push -----------------------┐
-  → Cron deadline re-check --------------------------┤
-  → MCP / REST access --------------------------------┤--> React frontend
-  → Drive action when explicitly requested -----------┘
-```
+| Content | Behaviour |
+| --- | --- |
+| Job and internship opportunities | Included when extraction and eligibility checks pass |
+| Placement shortlists, interviews, recruitment tests, and required recruitment steps | Classified as job or internship updates |
+| Semester exam schedules, seating plans, admit cards, and exam forms | Classified as exam information |
+| Assignments and submissions | Included only with a known future due date |
+| Events, festivals, hackathons, workshops, club activities, and preparation sessions | Excluded |
+| Scholarships, promotions, newsletters, and generic announcements | Excluded from the current feed |
+| Items older than 30 days or with passed deadlines | Hidden |
+| Completed or dismissed tasks | Excluded from High Priority and Upcoming Deadlines; available through status filters while still within the visibility window |
 
-This is the final planned phase. It intentionally does **not** include:
+A placement-cell sender alone does not make a message relevant. Jobs and important notices without a stated deadline can appear as **Deadline not specified**; this does not verify that an application is still open.
 
-- An AI chat assistant / conversational interface
-- Redis, queues, Kafka, RabbitMQ, or any other new infrastructure
-- Redux or a routing library (plain React state/hooks + tabs are enough
-  at this scope)
+Filtering applies to saved records as well as newly processed items. Hidden records are not deleted. Loaded task cards and the open detail drawer also expire locally while the dashboard remains open.
 
-### Architecture (Phase 1 + 2 + 3 + 4 + 5 scope)
+## Tech stack
 
-```
-backend/
-└── src/
-    ├── config/
-    │   ├── db.js            # MongoDB connection (Mongoose)
-    │   ├── env.js            # Centralized environment variable access
-    │   └── googleScopes.js   # Centralized, least-privilege OAuth scopes
-    ├── models/
-    │   ├── User.js             # Student profile schema
-    │   ├── GoogleConnection.js # Encrypted Google OAuth tokens (per user, per provider)
-    │   ├── Session.js          # Application login sessions (hashed token, TTL)
-    │   └── Task.js              # Processed, scored opportunities/tasks (Phase 3)
-    ├── routes/
-    │   ├── user.routes.js
-    │   ├── auth.routes.js       # Google OAuth start/callback, /me, /logout
-    │   ├── gmail.routes.js      # authenticated
-    │   ├── classroom.routes.js  # authenticated
-    │   ├── drive.routes.js      # authenticated
-    │   ├── task.routes.js       # authenticated - sync + task queries + status updates
-    │   └── mcp.routes.js        # authenticated - stateless MCP endpoint (Phase 4)
-    ├── controllers/
-    │   ├── user.controller.js
-    │   ├── auth.controller.js
-    │   ├── gmail.controller.js
-    │   ├── classroom.controller.js
-    │   ├── drive.controller.js
-    │   └── task.controller.js
-    ├── mcp/
-    │   └── server.js         # registers all 8 MCP tools, each a thin wrapper over
-    │                         # an existing service, bound to one authenticated user
-    ├── services/
-    │   ├── user.service.js
-    │   ├── auth.service.js      # sessions + find-or-create user from Google profile
-    │   ├── task.service.js      # Task CRUD/querying, status updates, urgency
-    │   │                        # recalculation, duplicate prevention, ownership
-    │   ├── sync.service.js      # orchestrates fetch -> normalize -> pipeline -> persist
-    │   ├── realtime/
-    │   │   └── socket.service.js # Socket.IO server: session-cookie auth, per-user
-    │   │                          # rooms, task:created/priority_updated/completed
-    │   ├── cron/
-    │   │   └── deadline.cron.js  # scheduled urgency/priority re-check (node-cron)
-    │   ├── google/
-    │   │   ├── oauth.service.js      # THE shared credential mechanism (auth URL, token
-    │   │   │                         # exchange, connection persistence, token refresh)
-    │   │   ├── gmail.service.js      # reads + normalizes Gmail messages
-    │   │   ├── classroom.service.js  # reads courses/announcements/courseWork
-    │   │   ├── drive.service.js      # search, metadata, upload
-    │   │   └── mock.data.js          # canned data, used only when GOOGLE_MOCK_MODE=true
-    │   ├── ingestion/
-    │   │   └── normalizer.js         # Gmail/Classroom -> one common shape
-    │   ├── ai/
-    │   │   ├── llm.service.js        # the only module that talks to OpenAI
-    │   │   ├── extractionSchema.js   # shared JSON Schema for structured outputs
-    │   │   ├── validateExtraction.js # defense-in-depth validation of LLM output
-    │   │   └── mock.extraction.js    # rule-based extractor, used only when OPENAI_MOCK_MODE=true
-    │   └── decision/
-    │       ├── eligibility.service.js # deterministic branch/CGPA/gradYear check
-    │       ├── importance.service.js  # deterministic 0-100 relevance score
-    │       ├── urgency.service.js     # deterministic 0-100 deadline-based score
-    │       ├── priority.service.js    # combines importance+urgency -> level + reasons
-    │       └── pipeline.service.js    # glues extraction->validation->the 3 engines together
-    ├── middlewares/
-    │   ├── error.middleware.js
-    │   ├── notFound.middleware.js
-    │   └── auth.middleware.js   # requireAuth - establishes req.user from the session cookie
-    ├── utils/
-    │   ├── asyncHandler.js
-    │   ├── ApiError.js
-    │   ├── apiResponse.js
-    │   ├── validateUserInput.js
-    │   ├── crypto.js               # AES-256-GCM encrypt/decrypt for stored tokens
-    │   ├── translateGoogleError.js # maps Google API errors to ApiErrors
-    │   └── timezone.js             # timezone-aware deadline resolution for urgency scoring
-    ├── app.js              # Express app (no listen())
-    └── server.js           # Creates the HTTP server, attaches Socket.IO, starts the
-                             # deadline cron, connects DB, warns on incomplete config, listens
+| Layer | Technologies |
+| --- | --- |
+| Frontend | React, Vite, CSS, Socket.IO client |
+| Backend | Node.js, Express |
+| Database | MongoDB, Mongoose |
+| AI extraction | Gemini through Google's OpenAI-compatible endpoint; optional OpenAI or mock mode |
+| Google integration | OAuth 2.0, Gmail API, Classroom API, Drive API |
+| Realtime and scheduling | Socket.IO, node-cron |
+| Tool access | Model Context Protocol SDK, Zod |
+| Tests | Node.js built-in test runner |
+
+## How it works
+
+1. The authenticated user starts a sync.
+2. Google services fetch Gmail messages and Classroom announcements/coursework.
+3. The normalizer produces a common source format. Age checks, duplicate checks, credential-notice filtering, and known Classroom deadline checks run before AI processing.
+4. Gemini classifies messages and extracts structured facts in batches. Responses are validated before use.
+5. Backend rules reject excluded categories, known ineligible opportunities, expired items, and undated assignments.
+6. Deterministic engines calculate importance, urgency, and priority.
+7. Accepted tasks are stored in MongoDB. Important new tasks generate Socket.IO notifications.
+8. The deadline cron updates urgency and priority as deadlines approach.
+
+The LLM **extracts facts and classifies content**. It does not calculate the final numeric priority.
+
+### Priority calculation
+
+```text
+priorityScore = round(importanceScore × 0.6 + urgencyScore × 0.4)
 ```
 
-The server intentionally refuses to start accepting requests until the
-MongoDB connection succeeds.
+Importance combines eligibility (up to 35), category relevance (up to 25), preferred-role matching (up to 20), and skill overlap (up to 20). Hard eligibility checks use branch, CGPA, and graduation year; skills contribute to importance.
 
-Architecture flow for every Google-backed request:
+Urgency depends on time remaining: within 24 hours scores 95, within 3 days 80, within a week 60, within two weeks 40, within 30 days 25, and beyond 30 days 12. Missing deadlines receive a baseline of 15. Expired tasks are filtered out.
 
-```
-Route → requireAuth (session cookie → req.user) → Controller → Google Service
-      → oauth.service.getAuthorizedClient(req.user.id) → Google API
-```
+Priority levels are **critical ≥80**, **high ≥60**, **medium ≥35**, and **low <35**. The formula and contributing reasons remain visible in task details.
 
-Architecture flow for a task sync:
+Date-only deadlines resolve to the end of the day in the student's timezone. Classroom due dates/times take precedence over inferred deadlines. The extraction prompt uses the original message timestamp for relative phrases such as “tomorrow.”
 
-```
-POST /api/tasks/sync → requireAuth → sync.service
-  → gmail.service / classroom.service (fetch)
-  → ingestion/normalizer (common shape)
-  → decision/pipeline.service, per item:
-      ai/llm.service (extract) → ai/validateExtraction (validate)
-      → decision/eligibility.service → decision/importance.service
-      → decision/urgency.service → decision/priority.service
-  → task.service.createTaskIfNotExists (dedup + persist)
-  → realtime/socket.service.notifyTaskCreated (only if newly created AND important)
-```
+## Run locally
 
-Architecture flow for the deadline cron:
+### Requirements
 
-```
-node-cron tick → deadline.cron.runDeadlineCheck
-  → task.service.findPendingTasksWithDeadlines (bounded, populates the owner)
-  → task.service.recalculateUrgency, per task:
-      decision/urgency.service (reused, not reimplemented)
-      → decision/priority.service (reused, not reimplemented)
-      → only writes + notifies if the recomputed values actually changed
-  → realtime/socket.service.notifyTaskPriorityUpdated (only on a meaningful level change)
-```
+- Node.js satisfying the frontend's declared requirement: **20.19+ on Node 20, or 22.12+**.
+- npm and Git.
+- A running MongoDB instance or MongoDB Atlas connection.
+- A Google Cloud project configured for OAuth and the Gmail, Classroom, and Drive APIs.
+- A Gemini API key and a model available to that API project.
 
-Architecture flow for MCP:
-
-```
-AI client → POST /mcp (session cookie) → requireAuth → mcp/server.js
-  (a fresh McpServer bound to req.user via closure, per request)
-  → tool call → EXISTING service (task.service / user.service / driveService)
-  → MongoDB / Google API
-```
-
-Controllers never call Google or OpenAI APIs directly, no Google service
-re-implements token refresh (it's all in `oauth.service.js`), the LLM
-never makes eligibility/importance/urgency/priority decisions (those are
-deterministic backend calculations in `services/decision/*`), and MCP
-tools never touch MongoDB or Google APIs directly - every tool is a thin
-wrapper over the same service functions the REST API and Socket.IO
-handlers already use.
-
-### Frontend (Phase 5)
-
-```
-frontend/
-├── index.html
-├── vite.config.js       # dev server pinned to port 3000 (matches backend's
-│                         # default CLIENT_URL/CORS origin)
-├── .env.example          # only VITE_API_URL - no secrets ever live here
-└── src/
-    ├── main.jsx           # mounts <App/> inside <AuthProvider/>
-    ├── App.jsx             # tab-based shell: Dashboard / Profile / Drive
-    ├── index.css           # the entire design system (no UI library)
-    ├── api/
-    │   ├── client.js        # fetch wrapper - always credentials:'include',
-    │   │                     # never reads/stores any token itself
-    │   └── endpoints.js      # one function per existing backend route
-    ├── context/
-    │   └── AuthContext.jsx   # the ONLY source of identity - calls the
-    │                         # existing GET /api/auth/me, nothing else
-    ├── hooks/
-    │   ├── useTaskSocket.js  # Socket.IO client - same session cookie,
-    │   │                     # surfaces events as notifications + a refetch signal
-    │   └── useTasks.js       # fetches/filters tasks via the existing REST endpoints
-    └── components/
-        ├── LoginScreen.jsx        # "Sign in with Google" -> full-page redirect
-        ├── DashboardPage.jsx       # Critical/High + Upcoming Deadlines + All Tasks
-        ├── TaskCard.jsx / TaskList.jsx / TaskFilters.jsx
-        ├── TaskDetailDrawer.jsx    # full explainability: reasons, skills, eligibility
-        ├── SyncPanel.jsx           # triggers POST /api/tasks/sync, shows the summary
-        ├── ProfilePanel.jsx        # view/edit profile fields the engines use
-        ├── DrivePanel.jsx          # search + upload
-        ├── NotificationFeed.jsx    # renders Socket.IO events
-        └── Badges.jsx / Feedback.jsx  # small presentational primitives
-```
-
-Architecture flow for the frontend:
-
-```
-Browser → LoginScreen → GET /api/auth/google (full-page redirect, real OAuth)
-        → backend OAuth callback → redirect back to the frontend origin
-        → AuthContext calls GET /api/auth/me → session confirmed
-        → DashboardPage: useTasks() calls GET /api/tasks, /priority/high
-        → SyncPanel: POST /api/tasks/sync (existing pipeline runs)
-        → useTaskSocket(): Socket.IO connects with the same session cookie
-            → task:created / task:priority_updated / task:completed
-            → surfaced as notifications + trigger a plain refetch
-        → TaskDetailDrawer: PATCH /api/tasks/:id/status (completed/dismissed)
-        → DrivePanel: GET/POST /api/drive/files
-```
-
-The frontend never re-implements eligibility/importance/urgency/priority
-logic, never stores a Google or session token itself (identity lives
-only in the backend's httpOnly cookie), and never talks to Google or
-OpenAI directly - every screen reads from or writes to the existing
-REST/Socket.IO surface described above.
-
----
-
-## Installation
-
-Backend:
+### 1. Clone and install
 
 ```bash
+git clone https://github.com/manya-sh2/campus-action-engine-2.0.git
+cd campus-action-engine-2.0
 cd backend
 npm install
-```
-
-Frontend:
-
-```bash
-cd frontend
+cd ../frontend
 npm install
+cd ..
 ```
 
-## Configuration
+### 2. Configure Google OAuth
 
-**Windows / PowerShell users:** See [WINDOWS_SETUP.md](WINDOWS_SETUP.md)
-for the exact `.env` location, safe key check, and restart steps.
+Enable the Gmail, Google Classroom, and Google Drive APIs in your Google Cloud project. Configure the OAuth consent screen for your intended users and create a **Web application** OAuth client.
 
-The backend now reads `.env` from `backend/.env` regardless of where the
-Node process is started. To check whether the key was loaded **without
-printing it**, run `cd backend` and then `npm run check:config`.
+Register this local callback URI exactly:
 
-
-Copy the example environment file and fill in your own values:
-
-```bash
-cd backend
-cp .env.example .env
+```text
+http://localhost:5000/api/auth/google/callback
 ```
 
-On Windows PowerShell, use `Copy-Item .env.example .env` from the
-`backend` directory instead. If your `.env` already exists, don't
-overwrite it with the example. Restart the backend after editing it.
+For a consent screen in testing mode, add the accounts that will test the app. The application requests identity scopes, Gmail read-only access, Classroom read-only access, and `drive.file`. The exact scope list lives in [googleScopes.js](backend/src/config/googleScopes.js).
 
-`.env` variables:
+The `drive.file` scope limits file access to files available to this app; Drive search does not search the user's entire Drive.
 
-| Variable                | Description                                                                 | Example                                                |
-|-------------------------|-------------------------------------------------------------------------------|---------------------------------------------------------|
-| `PORT`                  | Port the API listens on                                                       | `5000`                                                   |
-| `NODE_ENV`               | `development` or `production`                                                 | `development`                                            |
-| `MONGODB_URI`            | Mongoose connection string                                                    | `mongodb://localhost:27017/campus-action-engine`        |
-| `CLIENT_URL`             | Frontend origin - used for CORS and post-login redirects                     | `http://localhost:3000`                                  |
-| `GOOGLE_CLIENT_ID`       | OAuth client ID from Google Cloud Console                                     | `123-abc.apps.googleusercontent.com`                     |
-| `GOOGLE_CLIENT_SECRET`   | OAuth client secret from Google Cloud Console                                 | `GOCSPX-xxxxxxxx`                                        |
-| `GOOGLE_REDIRECT_URI`    | Must exactly match a redirect URI registered in Google Cloud Console          | `http://localhost:5000/api/auth/google/callback`         |
-| `TOKEN_ENCRYPTION_KEY`   | 64-char hex (32-byte) key used to encrypt stored Google tokens                | see "Generating `TOKEN_ENCRYPTION_KEY`" below            |
-| `SESSION_COOKIE_NAME`    | Name of the application session cookie                                        | `cae_session`                                             |
-| `SESSION_TTL_DAYS`       | How many days a login session stays valid                                     | `7`                                                       |
-| `GOOGLE_MOCK_MODE`       | `"true"` to use canned Gmail/Classroom/Drive data instead of real Google APIs | `false`                                                   |
-| `AI_PROVIDER`           | AI provider, `gemini` (recommended) or `openai`                               | `gemini`                                                  |
-| `GEMINI_API_KEY`        | Google AI Studio Gemini API key, required for Gemini mode                     | (secret)                                                  |
-| `GEMINI_MODEL`          | Gemini model available to your Google AI Studio project                      | `gemini-3.1-flash-lite`                                    |
-| `GEMINI_BASE_URL`       | Gemini's OpenAI-compatible API endpoint                                      | `https://generativelanguage.googleapis.com/v1beta/openai/` |
-| `GEMINI_MIN_REQUEST_INTERVAL_MS` | Delay between Gemini API requests (helps free RPM limits)          | `6000`                                                    |
-| `OPENAI_API_KEY`        | Only required when `AI_PROVIDER=openai`                                       | (secret)                                                  |
-| `OPENAI_MODEL`          | Model when using actual OpenAI API                                            | `gpt-4o-mini`                                             |
-| `AI_MOCK_MODE`          | `"true"` uses the local rule-based extractor instead of either API            | `false`                                                   |
+### 3. Configure the backend
 
-`.env` is git-ignored — never commit real credentials.
+Create `backend/.env`. If it already exists, edit it rather than overwriting your credentials.
 
-### Generating `TOKEN_ENCRYPTION_KEY`
+The checked-in `backend/.env.example` still contains older OpenAI-oriented settings. Use the Gemini block below in your actual `backend/.env`:
 
-Google access/refresh tokens are encrypted (AES-256-GCM) before being
-stored in MongoDB. Generate a key once per environment and keep it
-stable — rotating it invalidates every stored Google connection (users
-would need to reconnect):
+```dotenv
+PORT=5000
+NODE_ENV=development
+MONGODB_URI=mongodb://localhost:27017/campus-action-engine
+CLIENT_URL=http://localhost:3000
+
+GOOGLE_CLIENT_ID=your_google_oauth_client_id
+GOOGLE_CLIENT_SECRET=your_google_oauth_client_secret
+GOOGLE_REDIRECT_URI=http://localhost:5000/api/auth/google/callback
+TOKEN_ENCRYPTION_KEY=your_64_character_hex_key
+
+GOOGLE_MOCK_MODE=false
+AI_PROVIDER=gemini
+GEMINI_API_KEY=your_gemini_api_key
+GEMINI_MODEL=your_available_gemini_model
+AI_MOCK_MODE=false
+OPENAI_MOCK_MODE=false
+
+GEMINI_MIN_REQUEST_INTERVAL_MS=16000
+GEMINI_MAX_REQUESTS_PER_MINUTE=4
+GEMINI_DAILY_REQUEST_BUDGET=12
+GEMINI_BATCH_SIZE=4
+GEMINI_MAX_ITEMS_PER_SYNC=24
+
+SESSION_COOKIE_NAME=cae_session
+SESSION_TTL_DAYS=7
+ENABLE_DEADLINE_CRON=true
+DEADLINE_CRON_SCHEDULE=*/15 * * * *
+```
+
+Replace the placeholders. Generate the encryption key with:
 
 ```bash
 node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 ```
 
-Paste the output into `TOKEN_ENCRYPTION_KEY` in `.env`.
+Keep this key stable once Google tokens have been stored. Keep all credentials in the backend; do not commit `.env` or put keys in frontend variables.
 
-## MongoDB
-
-You need a MongoDB instance reachable at `MONGODB_URI`. Options:
-
-- **Local install**: run `mongod` locally (default URI works out of the box).
-- **MongoDB Atlas**: create a free cluster and paste the connection string
-  into `MONGODB_URI`.
-- **Docker**: `docker run -d -p 27017:27017 --name cae-mongo mongo:7`
-
-If MongoDB is unreachable, the server logs the error and exits — it will
-not silently start without a database connection.
-
-## Google Cloud Setup
-
-You need a Google Cloud project with OAuth credentials before Google
-sign-in will work. If you don't have real credentials yet, skip to
-**Mock Mode** below to test everything else first.
-
-### 1. Create/select a project
-
-Go to [Google Cloud Console](https://console.cloud.google.com/) and
-create a project (or pick an existing one).
-
-### 2. Enable the required APIs
-
-Under **APIs & Services → Library**, enable each of these individually:
-
-- **Gmail API**
-- **Google Classroom API**
-- **Google Drive API**
-
-### 3. Configure the OAuth consent screen
-
-Under **APIs & Services → OAuth consent screen**:
-
-- User type: **External** (or **Internal** if you're on a Google
-  Workspace org and only your org's students will use this).
-- Fill in app name, support email, developer contact.
-- Add yourself (and any other testers) under **Test users** while the
-  app is in "Testing" publishing status — required for Gmail/Classroom
-  scopes to work at all until the app passes Google's verification.
-- Under **Scopes**, add the same scopes listed below (Google will ask
-  you to justify sensitive/restricted scopes — Gmail read and Classroom
-  scopes fall into this category).
-
-### 4. Create OAuth 2.0 credentials
-
-Under **APIs & Services → Credentials → Create Credentials → OAuth
-client ID**:
-
-- Application type: **Web application**
-- Authorized redirect URIs: add exactly what you'll put in
-  `GOOGLE_REDIRECT_URI`, e.g. `http://localhost:5000/api/auth/google/callback`
-- Copy the generated **Client ID** and **Client Secret** into
-  `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` in `.env`.
-
-### Required OAuth scopes
-
-Centralized in `src/config/googleScopes.js` — least-privilege, read-only
-wherever possible:
-
-| Scope | Why |
-|---|---|
-| `openid`, `email`, `profile` | Identify who signed in (id, email, name) |
-| `https://www.googleapis.com/auth/gmail.readonly` | Read Gmail messages; this app never sends or modifies email |
-| `https://www.googleapis.com/auth/classroom.courses.readonly` | List courses |
-| `https://www.googleapis.com/auth/classroom.announcements.readonly` | Read announcements |
-| `https://www.googleapis.com/auth/classroom.coursework.me.readonly` | Read the signed-in student's own coursework |
-| `https://www.googleapis.com/auth/drive.file` | Search/read/upload only files this app creates or the user explicitly opens with it — **not** the whole Drive |
-
-**Drive scope tradeoff:** `drive.file` is intentionally the narrowest
-practical scope, but it means `GET /api/drive/files?q=...` will only
-find files the app itself created or that the user picked via a Google
-Picker (not implemented in this phase) — it will **not** find
-pre-existing files like an old resume already sitting in the user's
-Drive. If your use case needs to search the user's entire existing
-Drive, swap `DRIVE` in `src/config/googleScopes.js` for
-`https://www.googleapis.com/auth/drive.readonly` (read-only, broader) and
-re-consent. This is a deliberate least-privilege default, not an
-oversight.
-
-## Mock Mode
-
-Don't have Google Cloud credentials set up yet, or want to test the rest
-of the app without hitting real Google APIs? Set:
-
-```
-GOOGLE_MOCK_MODE=true
-```
-
-With this on, `GET /api/gmail/messages`, the Classroom endpoints, and
-`GET /api/drive/files` all return small, clearly-fake canned datasets
-from `src/services/google/mock.data.js` instead of calling Google.
-Uploading a file (`POST /api/drive/files`) returns a fake Drive file id
-without actually contacting Drive.
-
-Important: **the OAuth login flow itself still runs for real** even in
-mock mode — you still need `GOOGLE_CLIENT_ID`/`GOOGLE_CLIENT_SECRET`/
-`GOOGLE_REDIRECT_URI` configured and a real Google sign-in to get a
-session, because mock mode only swaps out the Gmail/Classroom/Drive
-*data*, not authentication. This lets you test the whole
-auth → session → protected-route pipeline with real Google identity
-while still faking the Workspace data underneath. Never enable
-`GOOGLE_MOCK_MODE` in production.
-
-### OpenAI mock mode
-
-Similarly, don't have an OpenAI API key set up yet? Set:
-
-```
-OPENAI_MOCK_MODE=true
-```
-
-With this on, `POST /api/tasks/sync` uses a small deterministic
-rule-based extractor (`src/services/ai/mock.extraction.js`) instead of
-calling OpenAI - it looks for known branch codes, a `"CGPA <n>"`
-pattern, graduation-year mentions, known skill names, and date-like
-phrases in the text. It's not an LLM and won't understand phrasing an
-LLM would, but it's enough to exercise the full eligibility → importance
-→ urgency → priority pipeline end-to-end offline. Never enable
-`OPENAI_MOCK_MODE` in production. The two mock flags are independent -
-you can mix real Google + mock OpenAI, mock Google + real OpenAI, or
-any other combination while developing.
-
-## Running the server
+The backend loads `backend/.env` regardless of the terminal's working directory. Check configuration without printing the keys:
 
 ```bash
-npm run dev     # nodemon, auto-restarts on file changes
-# or
-npm start       # plain node
+cd backend
+npm run check:config
 ```
 
-On success you'll see:
+Restart the backend after changing environment variables.
 
-```
-[db] Connected to MongoDB: campus-action-engine
-[server] Campus Action Engine API listening on port 5000 (development)
-[server] Socket.IO and MCP (/mcp) are attached to the same server.
-```
+### 4. Configure and start the frontend
 
-## Running the frontend
+Create `frontend/.env` with:
 
-Copy the frontend env file - it holds nothing but the backend's URL:
-
-```bash
-cd frontend
-cp .env.example .env
+```dotenv
+VITE_API_URL=http://localhost:5000
 ```
 
-```bash
-npm run dev      # Vite dev server on http://localhost:3000 (pinned - see vite.config.js)
-```
+Start the backend and frontend in separate terminals:
 
-Open `http://localhost:3000`. The dev server is pinned to port 3000
-because the backend's default `CLIENT_URL` (used for CORS and the OAuth
-redirect target) is `http://localhost:3000` - if you change one, change
-the other to match, or the session cookie won't be sent/accepted.
+| Terminal | Directory | Command |
+| --- | --- | --- |
+| Backend | `backend` | `npm run dev` |
+| Frontend | `frontend` | `npm run dev` |
 
-For a production-style build:
+Open **http://localhost:3000**. The backend listens on **http://localhost:5000** and waits for MongoDB before accepting requests.
 
-```bash
-npm run build     # outputs to frontend/dist
-npm run preview   # serves the build on port 3000
-```
+Sign in with Google, fill in your profile and timezone, then select **Sync Gmail & Classroom**. Use the Profile and Drive tabs for profile edits and file operations.
 
-## Running the full stack
+Additional Windows troubleshooting is available in [WINDOWS_SETUP.md](WINDOWS_SETUP.md).
 
-1. Start MongoDB (see above).
-2. Terminal 1: `cd backend && npm run dev`
-3. Terminal 2: `cd frontend && npm run dev`
-4. Open `http://localhost:3000`, click **Sign in with Google**, grant
-   access, and you'll land back on the dashboard - click **Sync Gmail &
-   Classroom** to pull in real data and watch it get scored and
-   prioritized in real time.
+## Gemini request limits
 
-Don't have Google/OpenAI credentials yet? Set `GOOGLE_MOCK_MODE=true`
-and `OPENAI_MOCK_MODE=true` in `backend/.env` first (see Mock Mode
-below) - the OAuth login flow still runs for real, but Gmail/Classroom/
-Drive/LLM data is canned, so the whole flow (including the frontend) is
-demoable without any external credentials at all.
+These are **application-side settings**, not a statement of the quota granted to your Google project.
 
-## Testing the health endpoint
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `GEMINI_MIN_REQUEST_INTERVAL_MS` | 16000 | Minimum gap between requests |
+| `GEMINI_MAX_REQUESTS_PER_MINUTE` | 4 | Local per-model request cap |
+| `GEMINI_DAILY_REQUEST_BUDGET` | 12 | Local per-model daily attempt budget |
+| `GEMINI_BATCH_SIZE` | 4 | Source items per extraction request |
+| `GEMINI_MAX_ITEMS_PER_SYNC` | 24 | New items selected for one sync |
 
-```bash
-curl http://localhost:5000/api/health
-```
+A full 24-item sync uses six four-item requests before retries. Failed requests and retries also count toward the local budget. The configured provider may apply additional limits.
 
-Expected:
+The usage ledger is stored in `backend/.runtime/gemini-usage.json`, so restarting the backend does not reset it. The local day boundary uses the America/Los_Angeles timezone. Preserve this file when updating an existing installation.
 
-```json
-{ "success": true, "message": "Campus Action Engine API is running" }
-```
+HTTP 429 responses pause processing and trigger quota/cooldown handling. Temporary server errors receive one bounded retry. Tasks already saved remain available; unprocessed items may be picked up on a later sync while still inside the source fetch limits and 30-day window.
 
-## Testing the user endpoints
+`AI_MOCK_MODE=true` selects the local rule-based extractor. `GOOGLE_MOCK_MODE=true` selects canned Google data, but does not create a mock browser login. Mock data can age out of the 30-day window. For optional OpenAI extraction, set `AI_PROVIDER=openai`, `OPENAI_API_KEY`, and `OPENAI_MODEL`.
 
-`POST /api/users` remains an **unauthenticated, development-only**
-endpoint for creating a profile before someone has signed in with
-Google (there's no session to authenticate against at that point).
-`GET /api/users/:id` and `PATCH /api/users/:id` require the session
-cookie (`requireAuth`) **and** are ownership-checked: they only succeed
-when `:id` matches the signed-in session's own user id — any other id
-returns `403 Forbidden`, never another user's data.
+## Terminal logs
 
-**Create a user** (no auth required)
+Keep the backend terminal open during sync.
 
-```bash
-curl -X POST http://localhost:5000/api/users \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "Rohit Sharma",
-    "email": "rohit@example.com",
-    "branch": "CSE",
-    "year": 3,
-    "graduationYear": 2027,
-    "cgpa": 8.4,
-    "skills": ["Node.js", "MongoDB", "C++"],
-    "preferredRoles": ["Backend Developer", "Software Engineer"]
-  }'
-```
+| Event | Meaning |
+| --- | --- |
+| `sync.started` | A sync began; `syncId` groups its progress |
+| `sync.fetched` / `sync.selected` | Source counts and items selected for AI processing |
+| `sync.batch_started` | A batch is queued; request pacing may delay its request |
+| `ai.request_started` | A provider request was issued |
+| `ai.response_received` | The provider responded; extraction validation still follows |
+| `sync.batch_completed` | Cumulative processed, created, ignored, expired, and failed counts |
+| `ai.request_failed` | Provider status and attempt number |
+| `sync.paused` / `sync.finished` | Final counts and remaining local quota |
+| `http.finished` | HTTP method, route template, status, and duration |
 
-**Fetch or update your own profile** (requires the session cookie - see
-"Connecting Google" below for how to get one)
+The structured logger uses an operational-field allowlist and excludes email subjects/bodies, request headers, credentials, and raw provider errors. The dashboard displays processing errors and deferred-item counts.
 
-```bash
-curl -b cookies.txt http://localhost:5000/api/users/<your-own-id>
+## API overview
 
-curl -b cookies.txt -X PATCH http://localhost:5000/api/users/<your-own-id> \
-  -H "Content-Type: application/json" \
-  -d '{ "cgpa": 9.1 }'
-```
+Google-data and task endpoints require the application session cookie created by Google sign-in.
 
-Using any id other than your own signed-in user's id returns `403`.
+| Method | Endpoint | Purpose |
+| --- | --- | --- |
+| GET | `/api/health` | API health |
+| GET | `/api/auth/google` | Start Google sign-in |
+| GET | `/api/auth/me` | Current user |
+| POST | `/api/auth/logout` | End the current application session |
+| POST | `/api/tasks/sync` | Fetch, extract, filter, score, and save tasks |
+| GET | `/api/tasks` | Filtered, paginated tasks |
+| GET | `/api/tasks/priority/high` | Active critical/high-priority tasks |
+| GET | `/api/tasks/:taskId` | Task details |
+| PATCH | `/api/tasks/:taskId/status` | Change task status |
+| GET / PATCH | `/api/users/:id` | Read/update the signed-in user's profile |
+| GET / POST | `/api/drive/files` | Search/upload files |
+| GET | `/api/drive/files/:fileId` | File metadata |
+| POST | `/mcp` | Authenticated MCP requests |
 
-**Validation errors** (e.g. invalid email, out-of-range CGPA) return `400`
-with a list of human-readable messages. A nonexistent user id returns `404`
-(only reachable for your own id, since a mismatched id is rejected with
-`403` before the lookup even happens). A duplicate email on creation
-returns `409`.
+Task-list filters include `status`, `category`, `priorityLevel`, `minPriority`, `hasDeadline=true`, `sortBy`, `sortOrder`, `page`, and `limit`. The query value `status=active` selects pending and in-progress tasks. Actual task statuses are `pending`, `in_progress`, `completed`, and `dismissed`.
 
-Note: if you later sign in with Google using the same email as a
-dev-created user, that existing profile is reused (its `googleId` gets
-attached) — you will not end up with two separate users for the same
-person.
-
-## Connecting Google
-
-1. Open `http://localhost:5000/api/auth/google` in a **browser** (not
-   curl — this is a redirect-based flow and you need to interactively
-   grant consent).
-2. Sign in and approve the requested permissions.
-3. Google redirects back to the backend, which creates/finds your
-   `User`, stores an encrypted `GoogleConnection`, starts a session, and
-   redirects you to `CLIENT_URL` with `?googleConnected=true`. Your
-   browser now holds an httpOnly session cookie.
-4. The frontend (see "Running the frontend" above) handles this whole
-   flow automatically. For manual REST testing instead, use a client
-   that persists cookies (Postman, Insomnia, or
-   `curl -c cookies.txt -b cookies.txt`) against the same cookie jar.
-
-**Check who you're logged in as**
-
-```bash
-curl -b cookies.txt http://localhost:5000/api/auth/me
-```
-
-**Log out**
-
-```bash
-curl -b cookies.txt -X POST http://localhost:5000/api/auth/logout
-```
-
-All of the endpoints below require this session cookie — calling them
-unauthenticated returns `401`.
-
-## Gmail endpoints
-
-**List recent messages** (optionally filtered with Gmail's search syntax)
-
-```bash
-curl -b cookies.txt "http://localhost:5000/api/gmail/messages?maxResults=10&q=internship"
-```
-
-**Get a single message**
-
-```bash
-curl -b cookies.txt http://localhost:5000/api/gmail/messages/<messageId>
-```
-
-Each message is normalized to `{ id, threadId, from, to, subject, snippet,
-body: { text, html }, attachments, receivedAt, labelIds }`.
-
-## Classroom endpoints
-
-**List active courses**
-
-```bash
-curl -b cookies.txt http://localhost:5000/api/classroom/courses
-```
-
-**List announcements for a course**
-
-```bash
-curl -b cookies.txt "http://localhost:5000/api/classroom/announcements?courseId=<courseId>"
-```
-
-**List coursework for a course**
-
-```bash
-curl -b cookies.txt "http://localhost:5000/api/classroom/coursework?courseId=<courseId>"
-```
-
-**Get a single courseWork item's details**
-
-```bash
-curl -b cookies.txt http://localhost:5000/api/classroom/courses/<courseId>/coursework/<courseWorkId>
-```
-
-## Drive endpoints
-
-**Search files by name**
-
-```bash
-curl -b cookies.txt "http://localhost:5000/api/drive/files?q=resume"
-```
-
-**Get file metadata**
-
-```bash
-curl -b cookies.txt http://localhost:5000/api/drive/files/<fileId>
-```
-
-**Upload a file**
-
-```bash
-curl -b cookies.txt -X POST http://localhost:5000/api/drive/files \
-  -F "file=@/path/to/resume.pdf"
-```
-
-Remember: with the `drive.file` scope, search only returns files this
-app created or that were explicitly opened with it — see the scope
-tradeoff note above.
-
-## Task sync & endpoints (Phase 3)
-
-### Sync: fetch, extract, score, and store
-
-```bash
-curl -b cookies.txt -X POST http://localhost:5000/api/tasks/sync
-```
-
-This fetches recent Gmail messages and announcements/coursework from
-your active Classroom courses (via the existing Phase 2 services),
-normalizes them, runs each one through the LLM extraction → validation
-→ eligibility → importance → urgency → priority pipeline, and stores
-new tasks — skipping any that already exist. It returns a processing
-summary rather than the tasks themselves:
+Optional sync request body:
 
 ```json
 {
-  "success": true,
-  "message": "Sync complete",
-  "data": {
-    "fetched": 12,
-    "created": 9,
-    "duplicates": 2,
-    "failed": 1,
-    "errors": [
-      { "source": "gmail", "sourceId": "18d...", "title": "...", "reason": "Malformed extraction output: ..." }
-    ]
-  }
+  "includeGmail": true,
+  "includeClassroom": true,
+  "classroomCourseIds": ["your_course_id"],
+  "gmailMaxResults": 100
 }
 ```
 
-A failure processing one item (bad LLM output, an OpenAI error, etc.)
-never aborts the batch — it's recorded in `errors` and the rest of the
-sync continues.
+`gmailQuery` can further narrow Gmail searches; the 30-day restriction still applies. Sync summaries include `created`, `duplicates`, `ignored`, `expired`, `processed`, `deferred`, `failed`, `errors`, `stoppedReason`, and `quota`.
 
-Optional body to override defaults:
+## Realtime, scheduling, and MCP
 
-```bash
-curl -b cookies.txt -X POST http://localhost:5000/api/tasks/sync \
-  -H "Content-Type: application/json" \
-  -d '{
-    "includeGmail": true,
-    "includeClassroom": true,
-    "classroomCourseIds": ["<courseId>"],
-    "gmailQuery": "internship OR deadline",
-    "gmailMaxResults": 20
-  }'
-```
+Socket.IO shares the backend HTTP server and authenticates the session cookie. Per-user rooms receive `task:created`, `task:priority_updated`, and `task:completed`. New-task notifications are emitted for critical/high-priority tasks. Clients can request completion through `task:mark_complete`.
 
-`classroomCourseIds` defaults to your active courses (capped at 5) if
-omitted. `userId` is never read from the request — the sync always runs
-against the authenticated session user.
+The deadline cron runs every 15 minutes by default. It recalculates urgency and priority for active, visible tasks with approaching deadlines, and sends priority notifications on qualifying level changes. **It does not fetch new emails.** Disable it with `ENABLE_DEADLINE_CRON=false`.
 
-### Reading your tasks
+The MCP server uses stateless HTTP at `POST /mcp`. Clients must send the application's session cookie; an endpoint URL alone is insufficient.
 
-**List with filtering, sorting, and pagination**
+| MCP tool | Operation |
+| --- | --- |
+| `get_my_profile` | Read the authenticated profile |
+| `get_urgent_tasks` | Read active high/critical tasks |
+| `get_upcoming_deadlines` | Read upcoming deadlines; default horizon 14 days |
+| `get_relevant_opportunities` | Read opportunities subject to current visibility rules |
+| `get_task_details` | Read an owned, visible task |
+| `search_drive_files` | Search files accessible to the app |
+| `upload_file_to_drive` | Upload base64 file content; requires `confirm: true` |
+| `mark_task_complete` | Complete a task; requires `confirm: true` |
 
-```bash
-curl -b cookies.txt "http://localhost:5000/api/tasks?status=pending&priorityLevel=critical,high&minPriority=50&sortBy=priorityScore&sortOrder=desc&page=1&limit=20"
-```
+The upload limit is 15 MiB decoded. REST, Socket.IO, and MCP reuse backend services for task status changes and ownership checks. MCP does not provide a built-in chat interface.
 
-Supported query params: `status`, `category`, `priorityLevel` (comma-
-separated for multiple), `minPriority`, `sortBy` (`priorityScore` |
-`urgencyScore` | `importanceScore` | `deadline` | `createdAt`),
-`sortOrder` (`asc`|`desc`), `page`, `limit` (capped at 100).
-
-**Critical/high priority tasks only**
+## Tests and checks
 
 ```bash
-curl -b cookies.txt http://localhost:5000/api/tasks/priority/high
+cd backend
+npm test
 ```
 
-**A single task**
+The repository includes 37 offline tests across configuration/sync, date-window handling, and dashboard policy. They cover batching, quota handling, duplicate skips, category filtering, expiration, timezone resolution, deadline pagination, and log-field filtering.
+
+Tests use stubs for external services. Passing them does not verify a live Google account, Gemini key, database connection, or browser flow.
+
+Frontend checks:
 
 ```bash
-curl -b cookies.txt http://localhost:5000/api/tasks/<taskId>
+cd frontend
+npm run lint
+npm run build
 ```
 
-Returns `404` for a nonexistent task **or** a task belonging to another
-user — ownership is enforced by querying `{ _id, userId }` together, so
-one user can never distinguish "not found" from "not yours."
+For a manual check, sign in, sync, inspect the terminal logs, complete or dismiss an important task, and verify that it leaves High Priority and Upcoming Deadlines.
 
-### Marking a task's status
+## Project layout
 
-```bash
-curl -b cookies.txt -X PATCH http://localhost:5000/api/tasks/<taskId>/status \
-  -H "Content-Type: application/json" \
-  -d '{ "status": "completed" }'
-```
+| Location | Responsibility |
+| --- | --- |
+| `backend/src/config` | Environment, database, Google scopes |
+| `backend/src/controllers` and `routes` | HTTP API |
+| `backend/src/models` | Users, sessions, encrypted connections, tasks, processed source IDs |
+| `backend/src/services/google` | Google API adapters and token refresh |
+| `backend/src/services/ingestion` | Source normalization |
+| `backend/src/services/ai` | Extraction, response validation, mock mode, Gemini quota ledger |
+| `backend/src/services/decision` | Eligibility, importance, urgency, priority |
+| `backend/src/services/realtime` and `cron` | Notifications and deadline recalculation |
+| `backend/src/mcp` | MCP tool definitions |
+| `backend/tests` | Offline regression tests |
+| `frontend/src` | Dashboard, profile, Drive, API client, and React hooks |
 
-`status` must be one of `pending`, `in_progress`, `completed`,
-`dismissed`. This single operation (`task.service.updateTaskStatus`) is
-reused identically by this REST endpoint, the Socket.IO
-`task:mark_complete` event, and the MCP `mark_task_complete` tool -
-status logic exists in exactly one place. Marking a task `completed`
-(from any of those three entry points) emits a `task:completed`
-Socket.IO event to the owning user.
+## Current limitations
 
-### Scoring formula
+- Sync is manually triggered. Automatic Classroom selection takes up to five courses, and the default Gmail fetch limit is 100 messages per sync (configurable up to 200). The UI does not yet expose course selection or a persistent Gmail pagination cursor.
+- Duplicate checks and cached ignored IDs avoid repeat AI calls. Previously processed items are not automatically re-extracted when a source, profile, or prompt changes.
+- Classification and deadlines depend on the extracted text. Batch bodies are truncated to 3,500 characters; attachments and linked pages are not parsed. Missing deadlines do not establish that an opportunity is open.
+- The 30-day rule also hides older sources whose deadlines are still in the future. Completed/dismissed history is subject to the same age and deadline filters.
+- Missing eligibility profile fields cannot be verified; the current Boolean eligibility result is not proof that every criterion was checked.
+- Quota reservations, sync locks, and cron scheduling target a single backend process. They are not distributed coordination mechanisms.
+- Drive access is limited by `drive.file`. There is no unrestricted Drive search or built-in conversational assistant.
+- Google tokens are encrypted at rest with AES-256-GCM; session tokens are hashed in MongoDB, and cookies are HTTP-only. The legacy `POST /api/users` profile-creation route remains unauthenticated. Review this and the broader authentication/deployment requirements before a public production deployment.
 
-- **Eligibility** (deterministic, backend-only): only branch, CGPA, and
-  graduation year are treated as hard requirements — matches the
-  worked example in the original product spec, where "Node.js/Java
-  preferred" is a skill signal, not a gate. Missing profile fields are
-  treated as *unverifiable*, not automatic failures.
-- **Importance** (0-100): eligibility match (≤35) + category relevance
-  (≤25) + preferred role match (≤20) + skill overlap (≤20).
-- **Urgency** (0-100): bucketed by time remaining until the deadline -
-  overdue = 100, <24h = 95, ≤3 days = 80, ≤1 week = 60, ≤2 weeks = 40,
-  ≤1 month = 25, beyond that = 12, no deadline detected = 15 baseline.
-  Date-only deadlines (e.g. `"2026-09-20"`) are resolved as end-of-day
-  in the student's own `timezone` field, not UTC.
-- **Priority**: `priorityScore = round(importance * 0.6 + urgency * 0.4)`,
-  mapped to a level (`critical` ≥80, `high` ≥60, `medium` ≥35, else
-  `low`). `priorityReasons` includes the formula plus every contributing
-  reason from both sub-engines, so every score is explainable.
-
-## Real-time updates (Socket.IO)
-
-Connect a Socket.IO client to the same host/port as the REST API,
-sending the **same session cookie** you got from the Google OAuth
-callback:
-
-```js
-import { io } from 'socket.io-client';
-
-const socket = io('http://localhost:5000', {
-  withCredentials: true, // sends the cae_session cookie
-});
-
-socket.on('task:created', ({ task }) => { /* a new important task arrived */ });
-socket.on('task:priority_updated', ({ task, previousLevel }) => { /* deadline pressure changed its level */ });
-socket.on('task:completed', ({ task }) => { /* marked done from REST, socket, or MCP */ });
-```
-
-A connection without a valid session cookie is rejected at handshake
-time (`connect_error`). Each authenticated socket joins a private room
-scoped to that user's id — events are only ever emitted to that room, so
-one user's browser tab can never receive another user's events, even if
-both are connected simultaneously.
-
-`task:created` fires only for **newly-created** tasks that are already
-`critical` or `high` priority (not every task from a sync — that would
-be noisy). `task:priority_updated` fires only when the deadline cron
-job's recomputation actually changes a task's priority level. Both
-thresholds match the same "important" definition used by
-`GET /api/tasks/priority/high`.
-
-**Client → server**: the only inbound event is `task:mark_complete`:
-
-```js
-socket.emit('task:mark_complete', { taskId }, (ack) => {
-  // ack: { success: true, data: {...} } or { success: false, message: "..." }
-});
-```
-
-This calls the exact same `task.service.updateTaskStatus` the REST
-endpoint uses — ownership is enforced identically (a taskId belonging to
-another user fails with `success: false`, never a crash or a silent
-no-op).
-
-## Deadline automation (cron)
-
-A `node-cron` job (schedule set by `DEADLINE_CRON_SCHEDULE`, default
-every 15 minutes) periodically re-checks pending tasks whose deadline is
-approaching or has passed, and recomputes their urgency/priority by
-reusing the exact same `decision/urgency.service.js` and
-`decision/priority.service.js` engines the original pipeline used - no
-scoring logic is duplicated for the recompute path. A task's stored
-`importanceScore` never changes (it doesn't depend on time), so only
-`urgencyScore`, `priorityScore`, and `priorityLevel` are updated.
-
-To avoid duplicate notifications and unnecessary writes, a task is only
-saved and only triggers a `task:priority_updated` event when the
-recomputed values **actually differ** from what's stored. Since time
-only moves forward, a given task can cross into a more urgent bucket at
-most once per bucket boundary — it won't re-notify on every cron tick
-just because it's still, say, "within a week."
-
-Set `ENABLE_DEADLINE_CRON=false` to disable the job entirely (e.g. for
-tests, or if you're running multiple instances and only want one of them
-scheduling it — this project intentionally has no distributed lock/queue
-for that, consistent with the "no new infrastructure" constraint).
-
-## MCP server
-
-An MCP (Model Context Protocol) endpoint is mounted at `POST /mcp`,
-authenticated with the **same session cookie** as the REST API — there
-is no separate MCP auth scheme. It runs in the SDK's stateless mode: a
-fresh `McpServer` is created per HTTP request, bound to that one
-authenticated user via closure (not a parameter), so there is no field
-an AI client could set to act on a different user's data.
-
-Connect an MCP client (e.g. `@modelcontextprotocol/sdk`'s
-`StreamableHTTPClientTransport`) to `http://localhost:5000/mcp`, sending
-the session cookie in request headers.
-
-**Available tools** — every tool is a thin wrapper over an existing
-service; none re-implements scoring, dedup, or ownership checks:
-
-| Tool | Reuses | Notes |
-|---|---|---|
-| `get_my_profile` | `user.service.findUserById` | read-only |
-| `get_urgent_tasks` | `task.service.getHighPriorityTasks` | read-only |
-| `get_upcoming_deadlines` | `task.service.getUpcomingDeadlines` | read-only, `withinDays` optional (default 14) |
-| `get_relevant_opportunities` | `task.service.listTasks` | read-only, filters to job/internship/scholarship |
-| `get_task_details` | `task.service.getTaskById` | read-only, 404-shaped error for another user's task |
-| `search_drive_files` | `driveService.listFiles` | read-only |
-| `upload_file_to_drive` | `driveService.uploadFile` | **write** - requires `confirm: true`; takes `fileContentBase64` (max 15MB decoded) |
-| `mark_task_complete` | `task.service.updateTaskStatus` | **write** - requires `confirm: true`; emits `task:completed` |
-
-The two write tools require an explicit `confirm: true` argument in
-addition to the MCP protocol's own `readOnlyHint`/`destructiveHint`
-annotations — calling them with `confirm` omitted or `false` returns an
-error result explaining that the caller must re-invoke with
-`confirm: true`, rather than silently performing the action. This is a
-deliberate, protocol-independent confirmation gate that doesn't rely on
-any particular MCP client's UI behavior.
-
-No tool ever returns a Google access/refresh token, an OpenAI API key,
-or a session token — profile and task payloads are built from explicit
-field whitelists (the same ones Socket.IO events use), not by
-serializing whole documents.
-
-## Frontend
-
-A single-page React app with three tabs, no router library needed at
-this scope:
-
-- **Dashboard** — the main screen:
-  - **Critical / High Priority**: tasks needing immediate attention
-    (`GET /api/tasks/priority/high`).
-  - **Upcoming Deadlines**: pending tasks with a deadline, soonest first.
-  - **All Tasks**: filterable (status/category/priority) and sortable,
-    with pagination.
-  - A **Sync Gmail & Classroom** button that calls `POST /api/tasks/sync`
-    and shows the resulting summary (created/duplicates/failed, with
-    per-item error detail if anything failed).
-  - Each task card shows title, category, organization, deadline,
-    priority level, importance/urgency/priority scores, eligibility, the
-    top reasons behind its priority, and its current status, with
-    "Mark complete" / "Dismiss" actions inline.
-  - Clicking a task opens a detail drawer with the full picture:
-    description, skills mentioned, every eligibility reason, every
-    priority reason, and an "Open"/apply link when `actionUrl` exists.
-- **Profile** — view and edit the fields the eligibility/importance
-  engines actually read (branch, year, graduation year, CGPA, skills,
-  preferred roles, timezone).
-- **Drive** — search existing Drive files by name and upload a new one,
-  using the exact same Phase 2/4 endpoints.
-
-A live notification feed (top-right) shows real-time Socket.IO events
-as they arrive (`task:created`, `task:priority_updated`,
-`task:completed`), and a small header indicator shows whether the
-socket is currently connected.
-
-**States handled explicitly**: initial session check (spinner), signed
-out (login screen, with a success/error banner if redirected back from
-a failed/successful Google login), API errors on any panel (inline
-banners, not silent failures), empty task lists (per-section empty
-states with a hint), sync failures (error banner + per-item failure
-list), and Drive search/upload failures (inline banners on that panel
-only, not a global crash).
-
-## Security & Token Storage Notes
-
-- Google access/refresh tokens are **never** sent to the frontend and
-  never appear in any normal API response (`GoogleConnection` excludes
-  them by default via `select: false`, and strips them again defensively
-  in `toJSON` as a second layer of protection).
-- Tokens are encrypted (AES-256-GCM) before being written to MongoDB, so
-  a database dump alone isn't enough to use someone's Google account.
-- The application session cookie is `httpOnly`, `sameSite: lax`, and
-  `secure` in production — JavaScript in the browser can't read it.
-  Only the session token's **hash** is stored in MongoDB (`Session`
-  model), not the raw token.
-- Every Gmail/Classroom/Drive/Drive-upload request resolves the target
-  user from the verified session (`req.user.id`) — a `userId` in the
-  request body/query/params is never trusted for authorization, so User
-  A cannot read or act on User B's Google connection.
-- The same applies to tasks: sync always runs against `req.user`, and
-  every task lookup/list query is scoped by `{ userId: req.user.id }` -
-  a `userId` field anywhere in a request body is ignored, and a task
-  belonging to another user returns `404`, not `403` (so its existence
-  isn't leaked either).
-- `GET /api/users/:id` and `PATCH /api/users/:id` require the session
-  cookie and compare the `:id` path param against `req.user._id` -
-  a mismatch returns `403 Forbidden` before any lookup or update
-  happens, so one signed-in user can never read or modify another
-  user's profile by changing the id in the URL. Only `POST /api/users`
-  (creating a profile before a first Google sign-in) remains open.
-- Socket.IO connections are authenticated with the identical session
-  cookie mechanism as the REST API (`authService.verifySession`) - there
-  is no separate, weaker auth path for sockets. Each socket joins a
-  private per-user room; events are only ever emitted to that room, so
-  cross-user delivery is structurally impossible, not just filtered.
-- MCP (`/mcp`) sits behind the same `requireAuth` middleware as every
-  other protected route, and each request's `McpServer` is bound to that
-  request's authenticated user via closure - no tool has a `userId`
-  parameter an AI client could override, so cross-user access isn't
-  policy-enforced, it's structurally unavailable.
-- Access tokens, refresh tokens, and the `OPENAI_API_KEY` are never
-  logged.
-- The frontend never sees a Google or OpenAI token or the raw session
-  token - it only ever holds the httpOnly session cookie the browser
-  attaches automatically, and its own `.env` contains nothing but the
-  backend's URL.
-- `.env` (backend and frontend, containing real secrets/config) is
-  git-ignored.
-
----
-
-## Phase 1 + 2 + 3 + 4 + 5 Limitations
-
-- The Phase 1 `POST /api/users` endpoint (dev-only profile creation,
-  used before a person has ever signed in with Google) remains
-  **unauthenticated** by necessity — there's no session to check against
-  yet at that point. `GET /api/users/:id` and `PATCH /api/users/:id` are
-  now authenticated (`requireAuth`) **and** ownership-checked: the
-  backend rejects any request where the `:id` in the URL doesn't match
-  the signed-in session's own user id (`403 Forbidden`), regardless of
-  what a client sends. The frontend's Profile tab was already only ever
-  calling these with the signed-in user's own id, so no frontend
-  behavior changed - the enforcement is now real on the server, not just
-  incidental.
-- There's no AI chat assistant / conversational UI - MCP gives an AI
-  *client* (like Claude Desktop) a way to read/act on the backend, and
-  the frontend gives a human a dashboard, but there's no chat interface
-  bridging the two, and none was in scope.
-- Sync is still triggered manually (the frontend's "Sync Gmail &
-  Classroom" button, or `POST /api/tasks/sync` directly) - there's no
-  scheduled *ingestion* job (only the deadline-recompute cron exists).
-  A student needs to click sync (or a future scheduler phase would need
-  to call it on their behalf) to pick up brand-new Gmail/Classroom items.
-- Drive search is scoped to `drive.file` (app-created/opened files only)
-  by design — see the scope tradeoff note above. The frontend's Drive
-  tab reflects this as-is (no explanation beyond the on-screen hint).
-- Classroom sync auto-selects up to 5 active courses if
-  `classroomCourseIds` isn't specified - the frontend doesn't expose a
-  way to pick specific courses (only the REST/MCP layer's optional
-  parameter does). The raw Phase 2 `GET /api/classroom/announcements`
-  and `.../coursework` endpoints still require an explicit `courseId`
-  query parameter (except in mock mode) — unchanged from Phase 2.
-- The Google OAuth consent screen must stay in Google's "Testing" mode
-  (or be verified by Google) for the Gmail/Classroom scopes to keep
-  working reliably outside of a fully published, verified app.
-- Session cookies are opaque, hashed, and revocable, but there's no
-  "view/revoke other active sessions" endpoint or UI yet - Socket.IO/MCP
-  share that same session, so signing out in the frontend also cuts off
-  any open socket connection and MCP access for that session.
-- LLM extraction quality depends entirely on the configured
-  `OPENAI_MODEL` and the source text; the deterministic scoring engines
-  are unit-tested and reliable, but they can only score what the LLM
-  correctly extracted. `OPENAI_MOCK_MODE`'s rule-based extractor is
-  intentionally simple and not a substitute for evaluating real LLM
-  extraction quality - the frontend will faithfully display whatever
-  either one produces.
-- The deadline cron runs in-process on a single instance with no
-  distributed lock or queue (by design - no new infrastructure was
-  added for this project). Running multiple instances of this server
-  would run the job redundantly on each one unless `ENABLE_DEADLINE_CRON`
-  is set to `false` on all but one.
-- MCP runs in the SDK's stateless HTTP mode (one request, one response,
-  no persistent MCP session) - Socket.IO (which the frontend uses) is
-  the real-time channel; MCP itself has no server-initiated stream.
-- The frontend has no client-side routing library and no build-time
-  code-splitting beyond Vite's defaults - reasonable at this scope
-  (three tabs, no deep-linkable sub-pages), but worth knowing if the UI
-  grows significantly.
-- No automated test suite (frontend or backend) is checked into the
-  repo - verification at each phase was done via temporary smoke-test
-  harnesses, deleted after each phase.
-
-
-### Gemini free-tier reliability update
-
-This build includes a local quota ledger (`backend/.runtime`, ignored by Git),
-conservative request pacing (4/min, 12/day default), four-item extraction batches,
-a 24-item sync cap, a one-time 503 retry, an adaptive 429 cooldown, and a
-MongoDB cache of ignored source IDs. The API sync response includes `deferred`,
-`processed`, `stoppedReason` and `quota` fields. See `WINDOWS_SETUP.md` for
-details, including how to configure your project's actual Google AI Studio
-model and quota limits.
+For applying the dashboard update to an existing installation, see [APPLY_DASHBOARD_FIXES.md](APPLY_DASHBOARD_FIXES.md).
